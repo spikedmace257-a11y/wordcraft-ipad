@@ -1,0 +1,42 @@
+name: Deploy WordCraft
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Download WordCraft
+        run: |
+          curl -fL --retry 3 \
+            https://github.com/storytold/wordcraft/releases/download/v0.18.1/wordcraft-web-0.18.1.zip \
+            -o wordcraft.zip
+          unzip -q wordcraft.zip -d extracted
+          SITE=$(find extracted -name index.html -printf '%h\n' | head -n 1)
+          test -n "$SITE"
+          mkdir -p public
+          cp -a "$SITE"/. public/
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload website
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@v4
