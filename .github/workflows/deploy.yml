@@ -19,6 +19,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+
       - name: Download WordCraft
         shell: bash
         run: |
@@ -37,14 +38,17 @@ jobs:
           SITE=$(dirname "$SITE")
 
           mkdir -p public
+
           cp -a "$SITE"/. public/
 
-      - name: Diagnose WordCraft
+          touch public/.nojekyll
+
+      - name: Diagnose WordCraft Files
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== FILES ==="
+          echo "=== WORDCRAFT FILES ==="
           find public -type f | head -80
 
           echo "=== INDEX.HTML ==="
@@ -64,6 +68,259 @@ jobs:
 
           echo "=== FILE SIZES ==="
           du -ah public | sort -h | tail -20
+
+      - name: Add Safari Startup Diagnostics
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("public/index.html")
+
+          html = p.read_text(encoding="utf-8")
+
+          script = r'''
+          <!-- WordCraft startup diagnostics -->
+
+          <script>
+          (() => {
+
+            let appStarted = false;
+            let lastError = null;
+
+            function formatError(error) {
+              if (error == null) {
+                return "Неизвестная ошибка";
+              }
+
+              return error.stack ||
+                     error.message ||
+                     String(error);
+            }
+
+            function getEnvironment() {
+
+              const wasm =
+                typeof WebAssembly !== "undefined";
+
+              const webgl2 =
+                typeof WebGL2RenderingContext !== "undefined";
+
+              const webgpu =
+                typeof navigator.gpu !== "undefined";
+
+              const initialized =
+                typeof window.wasmBindings !== "undefined";
+
+              return (
+                "\n\n=== СОСТОЯНИЕ БРАУЗЕРА ===" +
+
+                "\nWebAssembly: " +
+                (wasm ? "доступен" : "недоступен") +
+
+                "\nWebGL2 API: " +
+                (webgl2 ? "обнаружен" : "не обнаружен") +
+
+                "\nWebGPU API: " +
+                (webgpu ? "обнаружен" : "не обнаружен") +
+
+                "\nWASM bindings: " +
+                (initialized ? "созданы" : "не созданы") +
+
+                "\nСигнал запуска: " +
+                (appStarted ? "получен" : "не получен") +
+
+                "\nАдрес: " +
+                window.location.href +
+
+                "\nUser Agent: " +
+                navigator.userAgent
+              );
+            }
+
+            function showError(message) {
+
+              lastError = message;
+
+              function display() {
+
+                let box =
+                  document.getElementById("wordcraft_loading");
+
+                if (!box) {
+
+                  box = document.createElement("div");
+
+                  box.id = "wordcraft_diagnostics";
+
+                  document.body.appendChild(box);
+                }
+
+                box.style.cssText = `
+                  position: fixed;
+                  inset: 0;
+                  z-index: 999999;
+                  padding: 24px;
+                  box-sizing: border-box;
+                  background: #fff5f5;
+                  color: #8b0000;
+                  font: 14px system-ui, sans-serif;
+                  white-space: pre-wrap;
+                  overflow: auto;
+                  overflow-wrap: anywhere;
+                  text-align: left;
+                  pointer-events: auto;
+                `;
+
+                box.textContent =
+                  "ДИАГНОСТИКА WORDCRAFT\n\n" +
+                  message +
+                  getEnvironment();
+
+              }
+
+              if (document.body) {
+                display();
+              } else {
+                document.addEventListener(
+                  "DOMContentLoaded",
+                  display,
+                  { once: true }
+                );
+              }
+            }
+
+            window.addEventListener(
+              "error",
+              event => {
+
+                if (event.target !== window) {
+
+                  const target = event.target;
+
+                  const resource =
+                    target.src ||
+                    target.href ||
+                    target.tagName ||
+                    "неизвестный ресурс";
+
+                  showError(
+                    "ОШИБКА ЗАГРУЗКИ РЕСУРСА\n\n" +
+                    resource
+                  );
+
+                  return;
+                }
+
+                showError(
+                  "ОШИБКА JAVASCRIPT\n\n" +
+                  (event.message || "Неизвестная ошибка") +
+                  "\n\n" +
+                  formatError(event.error)
+                );
+
+              },
+              true
+            );
+
+            window.addEventListener(
+              "unhandledrejection",
+              event => {
+
+                showError(
+                  "ОШИБКА ЗАПУСКА WORDCRAFT\n\n" +
+                  formatError(event.reason)
+                );
+
+              }
+            );
+
+            window.addEventListener(
+              "TrunkApplicationStarted",
+              () => {
+
+                appStarted = true;
+
+                console.log(
+                  "WordCraft: WASM initialization completed"
+                );
+
+              }
+            );
+
+            setTimeout(() => {
+
+              if (lastError) {
+                return;
+              }
+
+              const loading =
+                document.getElementById("wordcraft_loading");
+
+              if (!loading) {
+                return;
+              }
+
+              const style =
+                window.getComputedStyle(loading);
+
+              const visible =
+                style.display !== "none" &&
+                style.visibility !== "hidden";
+
+              if (!visible) {
+                return;
+              }
+
+              if (!appStarted) {
+
+                showError(
+                  "WORDCRAFT НЕ ЗАПУСТИЛСЯ\n\n" +
+                  "За 45 секунд приложение не " +
+                  "отправило сигнал успешного запуска.\n\n" +
+                  "Возможные причины:\n" +
+                  "1. Ошибка инициализации WebAssembly.\n" +
+                  "2. Недостаточно памяти.\n" +
+                  "3. Несовместимость с Safari.\n" +
+                  "4. Ошибка графического движка."
+                );
+
+              } else {
+
+                showError(
+                  "WORDCRAFT ЧАСТИЧНО ЗАПУСТИЛСЯ\n\n" +
+                  "Сигнал инициализации получен, " +
+                  "но экран загрузки остаётся видимым.\n\n" +
+                  "Возможна проблема с графическим " +
+                  "интерфейсом или отображением Canvas."
+                );
+
+              }
+
+            }, 45000);
+
+          })();
+          </script>
+          '''
+
+          if "<head>" not in html:
+              raise SystemExit(
+                  "ERROR: <head> not found in index.html"
+              )
+
+          html = html.replace(
+              "<head>",
+              "<head>\n" + script,
+              1
+          )
+
+          p.write_text(
+              html,
+              encoding="utf-8"
+          )
+
+          print("Safari diagnostics installed successfully")
+          PY
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
