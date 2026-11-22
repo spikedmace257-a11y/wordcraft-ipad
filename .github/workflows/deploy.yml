@@ -1,4 +1,4 @@
-name: Deploy WordCraft
+name: Deploy WordCraft iPad
 
 on:
   workflow_dispatch:
@@ -11,6 +11,10 @@ permissions:
   pages: write
   id-token: write
 
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -20,265 +24,456 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-
       - name: Download WordCraft
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Downloading WordCraft v0.18.1..."
-
           curl -fL --retry 3 \
             https://github.com/storytold/wordcraft/releases/download/v0.18.1/wordcraft-web-0.18.1.zip \
             -o wordcraft.zip
 
-          mkdir -p extracted
-
           unzip -q wordcraft.zip -d extracted
 
           SITE=$(find extracted -name index.html -print -quit)
-
-          if [ -z "$SITE" ]; then
-            echo "ERROR: index.html not found"
-            exit 1
-          fi
-
-          SITE=$(dirname "$SITE")
+          test -n "$SITE"
 
           mkdir -p public
-
-          cp -a "$SITE"/. public/
+          cp -a "$(dirname "$SITE")"/. public/
 
           touch public/.nojekyll
 
-          echo "WordCraft downloaded successfully."
-
-      - name: Inspect WordCraft Loader
+      - name: Create iPad WASM Loader
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=================================="
-          echo "WORDCRAFT LOADER INSPECTION"
-          echo "=================================="
-
-          echo ""
-          echo "=== FILE STRUCTURE ==="
-
-          find public -maxdepth 2 -type f \
-            | head -60 || true
-
-          echo ""
-          echo "=== INDEX.HTML ==="
-
-          sed -n '1,180p' public/index.html
-
-          echo ""
-          echo "=== JAVASCRIPT FILES ==="
-
-          find public -type f \
-            \( -name "*.js" -o -name "*.mjs" \) \
-            -print
-
-          echo ""
-          echo "=== WASM FILES ==="
-
-          find public -name "*.wasm" \
-            -exec ls -lh {} \;
-
-          echo ""
-          echo "=== WASM INITIALIZATION ==="
-
-          python3 - <<'PY'
+          cat > build_loader.py <<'PY'
           from pathlib import Path
-          import re
-
-          patterns = [
-              r"instantiateStreaming",
-              r"WebAssembly\.instantiate",
-              r"WebAssembly\.compile",
-              r"fetch\(",
-              r"\.wasm",
-              r"__wbg_init",
-              r"initSync",
-          ]
-
-          regex = re.compile("|".join(patterns))
-
-          extensions = {".js", ".mjs", ".html"}
-
-          matches = 0
-
-          for path in Path("public").rglob("*"):
-              if path.suffix not in extensions:
-                  continue
-
-              try:
-                  content = path.read_text(
-                      encoding="utf-8",
-                      errors="replace"
-                  )
-              except Exception:
-                  continue
-
-              for match in regex.finditer(content):
-                  start = max(0, match.start() - 150)
-                  end = min(len(content), match.end() + 200)
-
-                  snippet = content[start:end]
-                  snippet = snippet.replace("\n", " ")
-
-                  print(f"\nFILE: {path}")
-                  print(f"POSITION: {match.start()}")
-                  print(f"CODE: {snippet}")
-
-                  matches += 1
-
-                  if matches >= 40:
-                      break
-
-              if matches >= 40:
-                  break
-
-          print()
-          print("TOTAL MATCHES SHOWN:", matches)
-          PY
-
-          echo ""
-          echo "=== INSPECTION COMPLETE ==="
-
-      - name: Create Diagnostics Page
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
+          import hashlib
+          import gzip
           import json
+          import re
 
           root = Path("public")
 
-          wasm_files = list(root.rglob("*.wasm"))
+          wasm_files = list(root.glob("*_bg.wasm"))
+          js_files = list(root.glob("wordcraft-web-*.js"))
 
-          if not wasm_files:
-              raise SystemExit("No WASM files found")
+          if len(wasm_files) != 1:
+              raise SystemExit("Expected exactly one WASM file")
 
-          wasm = max(
-              wasm_files,
-              key=lambda p: p.stat().st_size
-          )
+          if len(js_files) != 1:
+              raise SystemExit("Expected exactly one JS file")
 
-          wasm_path = "./" + wasm.relative_to(root).as_posix()
+          wasm = wasm_files[0]
+          js = js_files[0]
 
-          html = """
-          <!DOCTYPE html>
-          <html lang="ru">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport"
-                  content="width=device-width,initial-scale=1">
-            <title>WordCraft Diagnostics</title>
-            <style>
-              body {
-                font-family: system-ui, sans-serif;
-                padding: 20px;
-                background: #f5f5f5;
-              }
-              button {
-                padding: 12px;
-                margin: 6px;
-                font-size: 16px;
-              }
-              pre {
-                background: white;
-                padding: 15px;
-                white-space: pre-wrap;
-                overflow-wrap: anywhere;
-              }
-            </style>
-          </head>
-          <body>
+          data = wasm.read_bytes()
 
-          <h2>WordCraft Diagnostics</h2>
+          expected_hash = hashlib.sha256(data).hexdigest()
 
-          <p>Проверка загрузки WebAssembly.</p>
+          chunk_size = 2 * 1024 * 1024
 
-          <button onclick="diagnose()">
-            Проверить заголовки WASM
-          </button>
+          chunks_dir = root / "wasm-parts"
+          chunks_dir.mkdir(exist_ok=True)
 
-          <pre id="output"></pre>
+          parts = []
 
-          <script>
-          const WASM = __WASM_PATH__;
+          for offset in range(0, len(data), chunk_size):
+              chunk = data[offset:offset + chunk_size]
 
-          function log(text) {
-            document.getElementById("output")
-              .textContent += text + "\\n";
+              name = f"part-{len(parts):03d}.gz"
+
+              compressed = gzip.compress(
+                  chunk,
+                  compresslevel=9,
+                  mtime=0
+              )
+
+              (chunks_dir / name).write_bytes(compressed)
+
+              parts.append({
+                  "url": "./wasm-parts/" + name,
+                  "size": len(chunk),
+                  "compressedSize": len(compressed)
+              })
+
+          manifest = {
+              "wasmSize": len(data),
+              "sha256": expected_hash,
+              "js": "./" + js.name,
+              "parts": parts
           }
 
-          async function diagnose() {
-            document.getElementById("output")
-              .textContent = "";
-
-            log("WORDCRAFT DIAGNOSTICS");
-            log("=====================");
-
-            log("User Agent:");
-            log(navigator.userAgent);
-
-            log("");
-            log("WASM: " + WASM);
-
-            try {
-              const response = await fetch(WASM, {
-                method: "HEAD",
-                cache: "no-store"
-              });
-
-              log("HTTP: " + response.status);
-
-              for (const [key, value] of
-                   response.headers.entries()) {
-                log(key + ": " + value);
-              }
-
-            } catch (error) {
-              log("ERROR: " + error);
-            }
-          }
-          </script>
-
-          </body>
-          </html>
-          """
-
-          html = html.replace(
-              "__WASM_PATH__",
-              json.dumps(wasm_path)
-          )
-
-          (root / "diagnostics.html").write_text(
-              html,
+          (root / "wasm-manifest.json").write_text(
+              json.dumps(manifest, indent=2),
               encoding="utf-8"
           )
 
-          print("Diagnostics page created")
+          index = root / "index.html"
+          html = index.read_text(encoding="utf-8")
+
+          # Locate the original module script that starts WordCraft.
+          pattern = re.compile(
+              r'<script\b[^>]*type=["\']module["\'][^>]*>'
+              r'[\s\S]*?</script>',
+              re.IGNORECASE
+          )
+
+          scripts = list(pattern.finditer(html))
+
+          startup_scripts = [
+              match for match in scripts
+              if "TrunkApplicationStarted" in match.group(0)
+              and "module_or_path" in match.group(0)
+          ]
+
+          if len(startup_scripts) != 1:
+              raise SystemExit(
+                  "Cannot uniquely identify WordCraft startup script"
+              )
+
+          original_script = startup_scripts[0].group(0)
+
+          # The original startup script may contain a nonce or
+          # attributes. Replace only this identified script.
+          replacement = (
+              '<script type="module" '
+              'src="./ipad-loader.js"></script>'
+          )
+
+          html = html.replace(
+              original_script,
+              replacement,
+              1
+          )
+
+          index.write_text(html, encoding="utf-8")
+
+          print("WASM size:", len(data))
+          print("SHA-256:", expected_hash)
+          print("Parts:", len(parts))
+          print("JS:", js.name)
+
           PY
+
+          python3 build_loader.py
+
+          cat > public/ipad-loader.js <<'JS'
+          const statusElement = document.createElement("div");
+
+          statusElement.id = "ipad-loader-status";
+
+          Object.assign(statusElement.style, {
+            position: "fixed",
+            left: "50%",
+            top: "50%",
+            transform: "translate(-50%, -50%)",
+            zIndex: "999999",
+            background: "rgba(255,255,255,0.96)",
+            color: "#222",
+            padding: "22px",
+            borderRadius: "12px",
+            boxShadow: "0 4px 24px rgba(0,0,0,0.12)",
+            fontFamily: "system-ui, sans-serif",
+            fontSize: "15px",
+            textAlign: "center",
+            width: "min(340px, 85vw)",
+            boxSizing: "border-box"
+          });
+
+          statusElement.innerHTML = `
+            <strong>WordCraft</strong>
+            <p id="ipad-loader-message">
+              Подготовка...
+            </p>
+            <progress
+              id="ipad-loader-progress"
+              max="100"
+              value="0"
+              style="width:100%"
+            ></progress>
+            <pre
+              id="ipad-loader-error"
+              style="
+                white-space:pre-wrap;
+                overflow-wrap:anywhere;
+                text-align:left;
+                font-size:12px;
+              "
+            ></pre>
+          `;
+
+          document.body.appendChild(statusElement);
+
+          const message = document.getElementById(
+            "ipad-loader-message"
+          );
+
+          const progress = document.getElementById(
+            "ipad-loader-progress"
+          );
+
+          const errorBox = document.getElementById(
+            "ipad-loader-error"
+          );
+
+          function setStatus(text) {
+            message.textContent = text;
+            console.log("[WordCraft Loader]", text);
+          }
+
+          function sleep(ms) {
+            return new Promise(resolve =>
+              setTimeout(resolve, ms)
+            );
+          }
+
+          async function fetchWithRetry(url, attempts = 5) {
+            let lastError;
+
+            for (let attempt = 1; attempt <= attempts; attempt++) {
+              const controller = new AbortController();
+
+              const timeout = setTimeout(
+                () => controller.abort(),
+                90000
+              );
+
+              try {
+                const response = await fetch(url, {
+                  cache: "no-store",
+                  signal: controller.signal
+                });
+
+                if (!response.ok) {
+                  throw new Error(
+                    `HTTP ${response.status}: ${url}`
+                  );
+                }
+
+                return await response.arrayBuffer();
+
+              } catch (error) {
+                lastError = error;
+
+                console.warn(
+                  "Download failed:",
+                  url,
+                  attempt,
+                  error
+                );
+
+                if (attempt < attempts) {
+                  await sleep(2000 * attempt);
+                }
+
+              } finally {
+                clearTimeout(timeout);
+              }
+            }
+
+            throw lastError;
+          }
+
+          async function decompressGzip(buffer) {
+            if (!("DecompressionStream" in window)) {
+              throw new Error(
+                "Safari does not support DecompressionStream"
+              );
+            }
+
+            const stream = new Blob([buffer])
+              .stream()
+              .pipeThrough(
+                new DecompressionStream("gzip")
+              );
+
+            return new Response(stream).arrayBuffer();
+          }
+
+          async function sha256(buffer) {
+            const hash = await crypto.subtle.digest(
+              "SHA-256",
+              buffer
+            );
+
+            return Array.from(
+              new Uint8Array(hash)
+            ).map(
+              b => b.toString(16).padStart(2, "0")
+            ).join("");
+          }
+
+          async function startWordCraft() {
+            try {
+              setStatus("Загрузка конфигурации...");
+
+              const manifestResponse = await fetch(
+                "./wasm-manifest.json",
+                { cache: "no-store" }
+              );
+
+              if (!manifestResponse.ok) {
+                throw new Error(
+                  "Cannot load WASM manifest"
+                );
+              }
+
+              const manifest = await manifestResponse.json();
+
+              const wasmBytes = new Uint8Array(
+                manifest.wasmSize
+              );
+
+              let offset = 0;
+
+              for (
+                let i = 0;
+                i < manifest.parts.length;
+                i++
+              ) {
+                const part = manifest.parts[i];
+
+                setStatus(
+                  `Загрузка WASM: ${i + 1} / ${manifest.parts.length}`
+                );
+
+                const compressed = await fetchWithRetry(
+                  part.url
+                );
+
+                const decompressed = await decompressGzip(
+                  compressed
+                );
+
+                if (decompressed.byteLength !== part.size) {
+                  throw new Error(
+                    `Invalid part size: ${i}`
+                  );
+                }
+
+                wasmBytes.set(
+                  new Uint8Array(decompressed),
+                  offset
+                );
+
+                offset += decompressed.byteLength;
+
+                progress.value =
+                  offset / manifest.wasmSize * 100;
+              }
+
+              if (offset !== manifest.wasmSize) {
+                throw new Error(
+                  "WASM assembly size mismatch"
+                );
+              }
+
+              setStatus("Проверка целостности WASM...");
+
+              const actualHash = await sha256(
+                wasmBytes.buffer
+              );
+
+              if (actualHash !== manifest.sha256) {
+                throw new Error(
+                  "WASM SHA-256 mismatch"
+                );
+              }
+
+              setStatus("Компиляция WebAssembly...");
+
+              const wasmModule = await WebAssembly.compile(
+                wasmBytes
+              );
+
+              setStatus("Инициализация WordCraft...");
+
+              const bindings = await import(
+                manifest.js
+              );
+
+              const wasm = await bindings.default({
+                module_or_path: wasmModule
+              });
+
+              window.wasmBindings = bindings;
+
+              dispatchEvent(
+                new CustomEvent(
+                  "TrunkApplicationStarted",
+                  { detail: { wasm } }
+                )
+              );
+
+              setStatus("WordCraft запущен");
+
+              setTimeout(() => {
+                statusElement.remove();
+              }, 500);
+
+            } catch (error) {
+              console.error(
+                "WordCraft startup failed:",
+                error
+              );
+
+              setStatus("Ошибка запуска WordCraft");
+
+              errorBox.textContent =
+                error?.stack ||
+                error?.message ||
+                String(error);
+            }
+          }
+
+          startWordCraft();
+          JS
 
       - name: Verify Deployment
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking files..."
-
           test -f public/index.html
-          test -f public/diagnostics.html
+          test -f public/ipad-loader.js
+          test -f public/wasm-manifest.json
 
-          find public -name "*.wasm" -print
+          test -d public/wasm-parts
 
-          echo "All required files exist."
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import gzip
+          import hashlib
+
+          root = Path("public")
+
+          manifest = json.loads(
+              (root / "wasm-manifest.json").read_text()
+          )
+
+          reconstructed = bytearray()
+
+          for part in manifest["parts"]:
+              path = root / part["url"].removeprefix("./")
+
+              reconstructed.extend(
+                  gzip.decompress(path.read_bytes())
+              )
+
+          assert len(reconstructed) == manifest["wasmSize"]
+
+          assert (
+              hashlib.sha256(reconstructed).hexdigest()
+              == manifest["sha256"]
+          )
+
+          print("WASM parts verified")
+          print("Total parts:", len(manifest["parts"]))
+          PY
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
