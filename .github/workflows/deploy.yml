@@ -31,40 +31,14 @@ jobs:
           unzip -q wordcraft.zip -d extracted
 
           SITE=$(find extracted -name index.html -print -quit)
-
           test -n "$SITE"
 
           SITE=$(dirname "$SITE")
 
           mkdir -p public
-
           cp -a "$SITE"/. public/
 
           touch public/.nojekyll
-
-          echo "WordCraft files downloaded successfully"
-
-      - name: Verify WordCraft Files
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=== FILES ==="
-          find public -type f | head -80
-
-          echo "=== WEBASSEMBLY ==="
-          find public -type f -name "*.wasm"
-
-          echo "=== FILE SIZES ==="
-          du -ah public | sort -h | tail -20
-
-          test -f public/index.html
-
-          WASM=$(find public -type f -name "*_bg.wasm" -print -quit)
-
-          test -n "$WASM"
-
-          echo "WASM file: $WASM"
 
       - name: Create WASM Diagnostics
         shell: bash
@@ -75,303 +49,528 @@ jobs:
           from pathlib import Path
           import json
 
-          public = Path("public")
-
-          wasm_files = list(public.glob("*_bg.wasm"))
+          root = Path("public")
+          wasm_files = list(root.rglob("*.wasm"))
 
           if not wasm_files:
-              raise SystemExit("ERROR: WASM file not found")
+              raise SystemExit("WASM file not found")
 
-          wasm_name = wasm_files[0].name
+          wasm = max(
+              wasm_files,
+              key=lambda p: p.stat().st_size
+          )
 
-          print("Diagnostic WASM:", wasm_name)
+          wasm_path = wasm.relative_to(root).as_posix()
+          wasm_size = wasm.stat().st_size
+
+          print("WASM:", wasm_path)
+          print("Size:", wasm_size)
 
           html = r'''<!DOCTYPE html>
           <html lang="ru">
           <head>
           <meta charset="UTF-8">
-
           <meta name="viewport"
-                content="width=device-width, initial-scale=1">
+                content="width=device-width,initial-scale=1">
 
-          <title>WordCraft Diagnostics</title>
+          <title>WordCraft WASM Diagnostics</title>
 
           <style>
           body {
             font-family: system-ui, sans-serif;
-            padding: 20px;
             background: #f5f5f5;
+            margin: 0;
+            padding: 24px;
             color: #222;
           }
 
           h1 {
-            font-size: 24px;
+            font-size: 25px;
           }
 
           button {
             padding: 14px 20px;
             font-size: 16px;
+            background: #405bd4;
+            color: white;
             border: 0;
             border-radius: 8px;
-            background: #405bd8;
-            color: white;
-            cursor: pointer;
+            margin: 8px 8px 8px 0;
           }
 
           button:disabled {
-            opacity: 0.5;
+            opacity: .5;
           }
 
           pre {
             background: white;
-            padding: 16px;
-            border-radius: 8px;
+            padding: 18px;
+            border-radius: 10px;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
             font-size: 13px;
             line-height: 1.5;
+          }
+
+          progress {
+            width: 100%;
+            height: 22px;
+          }
+
+          a {
+            color: #405bd4;
           }
           </style>
           </head>
 
           <body>
 
-          <h1>WordCraft Diagnostics</h1>
+          <h1>WordCraft WASM Diagnostics</h1>
 
-          <p>Проверка загрузки WebAssembly на iPad.</p>
+          <p>
+          Проверка загрузки WebAssembly на iPad.
+          </p>
 
-          <button id="start" onclick="runTests()">
-            Запустить диагностику
+          <button id="start">
+          Запустить диагностику
           </button>
 
-          <pre id="log">Ожидание запуска...</pre>
+          <button id="copy">
+          Скопировать отчёт
+          </button>
+
+          <p>
+          <progress id="progress"
+                    value="0"
+                    max="100"></progress>
+          </p>
+
+          <p id="status">Ожидание запуска</p>
+
+          <pre id="log"></pre>
+
+          <p>
+          <a href="./">Открыть WordCraft</a>
+          </p>
 
           <script>
+          const WASM_FILE = __WASM_PATH__;
+          const EXPECTED_SIZE = __WASM_SIZE__;
 
-          const wasmFile = __WASM_FILE__;
+          const CHUNK_SIZE = 1024 * 1024;
+          const MAX_RETRIES = 5;
+          const REQUEST_TIMEOUT = 45000;
 
           const logElement =
             document.getElementById("log");
 
+          const progress =
+            document.getElementById("progress");
+
+          const status =
+            document.getElementById("status");
+
           const startButton =
             document.getElementById("start");
 
+          let running = false;
+
           function log(message) {
-            logElement.textContent += message + "\n";
+            logElement.textContent +=
+              message + "\n";
+
+            console.log(message);
           }
 
-          function formatBytes(bytes) {
-            return (
-              (bytes / 1024 / 1024).toFixed(2) +
-              " MB"
+          function sleep(ms) {
+            return new Promise(resolve =>
+              setTimeout(resolve, ms)
             );
           }
 
-          function elapsed(start) {
-            return (
-              (performance.now() - start) / 1000
-            ).toFixed(2);
+          function formatError(error) {
+            return error?.stack ||
+                   error?.message ||
+                   String(error);
           }
 
-          async function testRange(start, end) {
+          async function fetchChunk(start, end) {
 
-            log("\n=== RANGE TEST ===");
+            for (
+              let attempt = 1;
+              attempt <= MAX_RETRIES;
+              attempt++
+            ) {
 
-            log("Байты: " + start + "-" + end);
+              const controller =
+                new AbortController();
 
-            const started = performance.now();
-
-            try {
-
-              const response = await fetch(wasmFile, {
-                headers: {
-                  Range: `bytes=${start}-${end}`
-                },
-                cache: "no-store"
-              });
-
-              log("HTTP Status: " + response.status);
-
-              log(
-                "Content-Length: " +
-                response.headers.get("content-length")
+              const timer = setTimeout(
+                () => controller.abort(),
+                REQUEST_TIMEOUT
               );
 
-              log(
-                "Content-Range: " +
-                response.headers.get("content-range")
-              );
+              try {
 
-              if (response.status !== 206) {
-
-                log(
-                  "Сервер не подтвердил частичную загрузку."
+                const response = await fetch(
+                  WASM_FILE,
+                  {
+                    cache: "no-store",
+                    headers: {
+                      Range:
+                        `bytes=${start}-${end}`
+                    },
+                    signal: controller.signal
+                  }
                 );
 
-                if (response.body) {
-                  await response.body.cancel();
+                if (response.status !== 206) {
+                  throw new Error(
+                    "Expected HTTP 206, got " +
+                    response.status
+                  );
                 }
 
-                return;
-              }
+                const range =
+                  response.headers.get(
+                    "Content-Range"
+                  );
 
-              const buffer =
-                await response.arrayBuffer();
+                const encoding =
+                  response.headers.get(
+                    "Content-Encoding"
+                  );
 
-              log(
-                "Получено: " +
-                formatBytes(buffer.byteLength)
-              );
+                const expectedRange =
+                  `bytes ${start}-${end}/${EXPECTED_SIZE}`;
 
-              log(
-                "Время: " +
-                elapsed(started) +
-                " сек."
-              );
+                if (range !== expectedRange) {
+                  throw new Error(
+                    "Unexpected Content-Range: " +
+                    range
+                  );
+                }
 
-              const expected = end - start + 1;
+                const buffer =
+                  await response.arrayBuffer();
 
-              if (buffer.byteLength === expected) {
-                log("РЕЗУЛЬТАТ: OK");
-              } else {
-                log("РЕЗУЛЬТАТ: НЕПОЛНЫЕ ДАННЫЕ");
-              }
+                const expectedLength =
+                  end - start + 1;
 
-            } catch (error) {
+                if (
+                  buffer.byteLength !==
+                  expectedLength
+                ) {
+                  throw new Error(
+                    "Invalid chunk size: " +
+                    buffer.byteLength
+                  );
+                }
 
-              log("РЕЗУЛЬТАТ: ОШИБКА");
+                if (encoding) {
+                  log(
+                    "Content-Encoding: " +
+                    encoding
+                  );
+                }
 
-              log(error.name || "Error");
+                return new Uint8Array(buffer);
 
-              log(error.message || String(error));
+              } catch (error) {
 
-            }
-          }
-
-          async function testFullDownload() {
-
-            log("\n=== FULL DOWNLOAD TEST ===");
-
-            const started = performance.now();
-
-            try {
-
-              const response = await fetch(wasmFile, {
-                cache: "no-store"
-              });
-
-              log("HTTP Status: " + response.status);
-
-              log(
-                "Content-Length: " +
-                response.headers.get("content-length")
-              );
-
-              log(
-                "Content-Type: " +
-                response.headers.get("content-type")
-              );
-
-              if (!response.ok) {
-                throw new Error(
-                  "HTTP " + response.status
+                log(
+                  `Ошибка блока ${start}-${end}, ` +
+                  `попытка ${attempt}: ` +
+                  formatError(error)
                 );
+
+                if (attempt === MAX_RETRIES) {
+                  throw error;
+                }
+
+                await sleep(
+                  Math.min(
+                    15000,
+                    1500 * attempt
+                  )
+                );
+
+              } finally {
+                clearTimeout(timer);
               }
-
-              const buffer =
-                await response.arrayBuffer();
-
-              log(
-                "Получено: " +
-                formatBytes(buffer.byteLength)
-              );
-
-              log(
-                "Время: " +
-                elapsed(started) +
-                " сек."
-              );
-
-              log("РЕЗУЛЬТАТ: ЗАГРУЗКА УСПЕШНА");
-
-            } catch (error) {
-
-              log("РЕЗУЛЬТАТ: ОШИБКА");
-
-              log(error.name || "Error");
-
-              log(error.message || String(error));
-
             }
           }
 
-          async function runTests() {
+          async function diagnose() {
 
+            if (running) return;
+
+            running = true;
             startButton.disabled = true;
 
             logElement.textContent = "";
+            progress.value = 0;
 
             try {
 
               log("WORDCRAFT WASM DIAGNOSTICS");
+              log("==========================");
 
-              log("=========================");
-
-              log("\nUser Agent:");
-
+              log("User Agent:");
               log(navigator.userAgent);
 
+              log("");
               log(
-                "\nWebAssembly: " +
-                (typeof WebAssembly !== "undefined")
-              );
-
-              log(
-                "WebGL2: " +
-                (typeof WebGL2RenderingContext !==
+                "WebAssembly: " +
+                (typeof WebAssembly !==
                  "undefined")
               );
 
+              log("WASM: " + WASM_FILE);
               log(
-                "WebGPU: " +
-                (typeof navigator.gpu !== "undefined")
+                "Expected size: " +
+                EXPECTED_SIZE
               );
 
-              log("\nWASM FILE:");
+              log("");
+              log("=== HEADER TEST ===");
 
-              log(wasmFile);
+              const headerResponse =
+                await fetch(WASM_FILE, {
+                  method: "HEAD",
+                  cache: "no-store"
+                });
 
-              log("\nПроверка первого мегабайта");
+              log(
+                "HTTP Status: " +
+                headerResponse.status
+              );
 
-              await testRange(0, 1048575);
+              log(
+                "Content-Length: " +
+                headerResponse.headers.get(
+                  "Content-Length"
+                )
+              );
 
-              log("\nПроверка второго мегабайта");
+              log(
+                "Content-Encoding: " +
+                headerResponse.headers.get(
+                  "Content-Encoding"
+                )
+              );
 
-              await testRange(1048576, 2097151);
+              log(
+                "Content-Type: " +
+                headerResponse.headers.get(
+                  "Content-Type"
+                )
+              );
 
-              log("\nПроверка блока 10–11 MB");
+              log("");
+              log("=== CHUNK DOWNLOAD ===");
 
-              await testRange(10485760, 11534335);
+              const chunks = [];
 
-              log("\nПроверка полной загрузки");
+              let downloaded = 0;
 
-              await testFullDownload();
+              const started = performance.now();
 
-              log("\n=== ДИАГНОСТИКА ЗАВЕРШЕНА ===");
+              for (
+                let offset = 0;
+                offset < EXPECTED_SIZE;
+                offset += CHUNK_SIZE
+              ) {
+
+                const end = Math.min(
+                  offset + CHUNK_SIZE - 1,
+                  EXPECTED_SIZE - 1
+                );
+
+                status.textContent =
+                  "Загрузка: " +
+                  Math.floor(
+                    downloaded /
+                    EXPECTED_SIZE * 100
+                  ) + "%";
+
+                const chunk =
+                  await fetchChunk(offset, end);
+
+                chunks.push(chunk);
+
+                downloaded += chunk.byteLength;
+
+                progress.value =
+                  downloaded /
+                  EXPECTED_SIZE * 100;
+
+                log(
+                  "OK: " +
+                  offset + "-" + end +
+                  " (" +
+                  downloaded +
+                  "/" +
+                  EXPECTED_SIZE +
+                  ")"
+                );
+
+              }
+
+              const elapsed =
+                (performance.now() - started)
+                / 1000;
+
+              log("");
+              log("=== DOWNLOAD RESULT ===");
+
+              log(
+                "Downloaded: " +
+                downloaded
+              );
+
+              log(
+                "Time: " +
+                elapsed.toFixed(2) +
+                " seconds"
+              );
+
+              if (
+                downloaded !== EXPECTED_SIZE
+              ) {
+                throw new Error(
+                  "Downloaded size mismatch"
+                );
+              }
+
+              status.textContent =
+                "Сборка WebAssembly";
+
+              const wasmBytes =
+                new Uint8Array(EXPECTED_SIZE);
+
+              let position = 0;
+
+              for (const chunk of chunks) {
+
+                wasmBytes.set(
+                  chunk,
+                  position
+                );
+
+                position += chunk.byteLength;
+
+              }
+
+              log("");
+              log("=== WASM VALIDATION ===");
+
+              const magic =
+                Array.from(
+                  wasmBytes.slice(0, 8)
+                ).map(
+                  x => x.toString(16)
+                        .padStart(2, "0")
+                ).join(" ");
+
+              log("Header: " + magic);
+
+              const validMagic =
+                wasmBytes[0] === 0 &&
+                wasmBytes[1] === 97 &&
+                wasmBytes[2] === 115 &&
+                wasmBytes[3] === 109;
+
+              log(
+                "WASM magic valid: " +
+                validMagic
+              );
+
+              if (!validMagic) {
+                throw new Error(
+                  "Invalid WebAssembly header"
+                );
+              }
+
+              log("");
+              log("=== COMPILE TEST ===");
+
+              status.textContent =
+                "Компиляция WebAssembly";
+
+              const module =
+                await WebAssembly.compile(
+                  wasmBytes
+                );
+
+              log(
+                "Compilation: SUCCESS"
+              );
+
+              log(
+                "Imports: " +
+                WebAssembly.Module
+                  .imports(module).length
+              );
+
+              log(
+                "Exports: " +
+                WebAssembly.Module
+                  .exports(module).length
+              );
+
+              log("");
+              log("DIAGNOSTICS COMPLETED");
+
+              status.textContent =
+                "Проверка завершена успешно";
 
             } catch (error) {
 
-              log("\nНЕОЖИДАННАЯ ОШИБКА");
+              log("");
+              log("=== ERROR ===");
+              log(formatError(error));
 
-              log(String(error));
+              status.textContent =
+                "Диагностика завершилась ошибкой";
 
             } finally {
 
+              running = false;
               startButton.disabled = false;
 
             }
           }
 
+          document.getElementById(
+            "start"
+          ).addEventListener(
+            "click",
+            diagnose
+          );
+
+          document.getElementById(
+            "copy"
+          ).addEventListener(
+            "click",
+            async () => {
+
+              const report =
+                logElement.textContent;
+
+              try {
+                await navigator.clipboard
+                  .writeText(report);
+
+                alert("Отчёт скопирован");
+              } catch (error) {
+                alert(
+                  "Не удалось скопировать отчёт"
+                );
+              }
+
+            }
+          );
           </script>
 
           </body>
@@ -379,43 +578,23 @@ jobs:
           '''
 
           html = html.replace(
-              "__WASM_FILE__",
-              json.dumps(wasm_name)
+              "__WASM_PATH__",
+              json.dumps("./" + wasm_path)
           )
 
-          (public / "diagnostics.html").write_text(
+          html = html.replace(
+              "__WASM_SIZE__",
+              str(wasm_size)
+          )
+
+          (root / "diagnostics.html").write_text(
               html,
               encoding="utf-8"
           )
 
-          print("Diagnostics created successfully")
+          print("Diagnostics created")
+
           PY
-
-      - name: Verify Deployment
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=== VERIFY DEPLOYMENT ==="
-
-          test -f public/index.html
-
-          test -f public/diagnostics.html
-
-          WASM=$(find public -type f -name "*_bg.wasm" -print -quit)
-
-          test -n "$WASM"
-
-          echo "=== WASM SIZE ==="
-          du -h "$WASM"
-
-          echo "=== DIAGNOSTICS ==="
-          ls -lh public/diagnostics.html
-
-          echo "=== TOTAL SIZE ==="
-          du -sh public
-
-          echo "Verification successful"
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
