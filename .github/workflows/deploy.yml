@@ -13,21 +13,57 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Download WordCraft
+        shell: bash
         run: |
+          set -euo pipefail
+
           curl -fL --retry 3 \
             https://github.com/storytold/wordcraft/releases/download/v0.18.1/wordcraft-web-0.18.1.zip \
             -o wordcraft.zip
+
           unzip -q wordcraft.zip -d extracted
-          SITE=$(find extracted -name index.html -printf '%h\n' | head -n 1)
+
+          SITE=$(find extracted -name index.html -print -quit)
+
           test -n "$SITE"
+
+          SITE=$(dirname "$SITE")
+
           mkdir -p public
           cp -a "$SITE"/. public/
+
+      - name: Diagnose WordCraft
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== FILES ==="
+          find public -type f | head -80
+
+          echo "=== INDEX.HTML ==="
+          sed -n '1,160p' public/index.html
+
+          echo "=== JAVASCRIPT ==="
+          find public -type f \
+            \( -name "*.js" -o -name "*.mjs" \)
+
+          echo "=== WEBASSEMBLY ==="
+          find public -type f -name "*.wasm"
+
+          echo "=== RESOURCE PATHS ==="
+          grep -nE \
+            '(src=|href=|/assets/|/pkg/|\.wasm)' \
+            public/index.html || true
+
+          echo "=== FILE SIZES ==="
+          du -ah public | sort -h | tail -20
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
