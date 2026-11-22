@@ -3,7 +3,8 @@ name: Deploy WordCraft
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -19,28 +20,134 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+
       - name: Download WordCraft
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Downloading WordCraft v0.18.1..."
+
           curl -fL --retry 3 \
             https://github.com/storytold/wordcraft/releases/download/v0.18.1/wordcraft-web-0.18.1.zip \
             -o wordcraft.zip
 
+          mkdir -p extracted
+
           unzip -q wordcraft.zip -d extracted
 
           SITE=$(find extracted -name index.html -print -quit)
-          test -n "$SITE"
+
+          if [ -z "$SITE" ]; then
+            echo "ERROR: index.html not found"
+            exit 1
+          fi
 
           SITE=$(dirname "$SITE")
 
           mkdir -p public
+
           cp -a "$SITE"/. public/
 
           touch public/.nojekyll
 
-      - name: Create WASM Diagnostics
+          echo "WordCraft downloaded successfully."
+
+      - name: Inspect WordCraft Loader
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=================================="
+          echo "WORDCRAFT LOADER INSPECTION"
+          echo "=================================="
+
+          echo ""
+          echo "=== FILE STRUCTURE ==="
+
+          find public -maxdepth 2 -type f \
+            | head -60 || true
+
+          echo ""
+          echo "=== INDEX.HTML ==="
+
+          sed -n '1,180p' public/index.html
+
+          echo ""
+          echo "=== JAVASCRIPT FILES ==="
+
+          find public -type f \
+            \( -name "*.js" -o -name "*.mjs" \) \
+            -print
+
+          echo ""
+          echo "=== WASM FILES ==="
+
+          find public -name "*.wasm" \
+            -exec ls -lh {} \;
+
+          echo ""
+          echo "=== WASM INITIALIZATION ==="
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          patterns = [
+              r"instantiateStreaming",
+              r"WebAssembly\.instantiate",
+              r"WebAssembly\.compile",
+              r"fetch\(",
+              r"\.wasm",
+              r"__wbg_init",
+              r"initSync",
+          ]
+
+          regex = re.compile("|".join(patterns))
+
+          extensions = {".js", ".mjs", ".html"}
+
+          matches = 0
+
+          for path in Path("public").rglob("*"):
+              if path.suffix not in extensions:
+                  continue
+
+              try:
+                  content = path.read_text(
+                      encoding="utf-8",
+                      errors="replace"
+                  )
+              except Exception:
+                  continue
+
+              for match in regex.finditer(content):
+                  start = max(0, match.start() - 150)
+                  end = min(len(content), match.end() + 200)
+
+                  snippet = content[start:end]
+                  snippet = snippet.replace("\n", " ")
+
+                  print(f"\nFILE: {path}")
+                  print(f"POSITION: {match.start()}")
+                  print(f"CODE: {snippet}")
+
+                  matches += 1
+
+                  if matches >= 40:
+                      break
+
+              if matches >= 40:
+                  break
+
+          print()
+          print("TOTAL MATCHES SHOWN:", matches)
+          PY
+
+          echo ""
+          echo "=== INSPECTION COMPLETE ==="
+
+      - name: Create Diagnostics Page
         shell: bash
         run: |
           set -euo pipefail
@@ -48,839 +155,107 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import json
-          import hashlib
 
           root = Path("public")
+
           wasm_files = list(root.rglob("*.wasm"))
 
           if not wasm_files:
-              raise SystemExit("WASM file not found")
+              raise SystemExit("No WASM files found")
 
           wasm = max(
               wasm_files,
               key=lambda p: p.stat().st_size
           )
 
-          wasm_path = wasm.relative_to(root).as_posix()
-          wasm_size = wasm.stat().st_size
+          wasm_path = "./" + wasm.relative_to(root).as_posix()
 
-          sha256 = hashlib.sha256(
-              wasm.read_bytes()
-          ).hexdigest()
-
-          print("WASM:", wasm_path)
-          print("Size:", wasm_size)
-          print("SHA-256:", sha256)
-
-          html = r'''<!DOCTYPE html>
+          html = """
+          <!DOCTYPE html>
           <html lang="ru">
           <head>
-          <meta charset="UTF-8">
-          <meta name="viewport"
-                content="width=device-width,initial-scale=1">
-
-          <title>WordCraft WASM Diagnostics</title>
-
-          <style>
-          body {
-            font-family: system-ui, sans-serif;
-            background: #f5f5f5;
-            margin: 0;
-            padding: 20px;
-            color: #222;
-          }
-
-          h1 {
-            font-size: 24px;
-          }
-
-          button {
-            padding: 13px 17px;
-            font-size: 15px;
-            background: #405bd4;
-            color: white;
-            border: 0;
-            border-radius: 8px;
-            margin: 5px 5px 5px 0;
-          }
-
-          button:disabled {
-            opacity: .5;
-          }
-
-          pre {
-            background: white;
-            padding: 15px;
-            border-radius: 10px;
-            white-space: pre-wrap;
-            overflow-wrap: anywhere;
-            font-size: 12px;
-            line-height: 1.5;
-          }
-
-          progress {
-            width: 100%;
-            height: 24px;
-          }
-
-          #status {
-            font-weight: 600;
-          }
-          </style>
+            <meta charset="UTF-8">
+            <meta name="viewport"
+                  content="width=device-width,initial-scale=1">
+            <title>WordCraft Diagnostics</title>
+            <style>
+              body {
+                font-family: system-ui, sans-serif;
+                padding: 20px;
+                background: #f5f5f5;
+              }
+              button {
+                padding: 12px;
+                margin: 6px;
+                font-size: 16px;
+              }
+              pre {
+                background: white;
+                padding: 15px;
+                white-space: pre-wrap;
+                overflow-wrap: anywhere;
+              }
+            </style>
           </head>
-
           <body>
 
-          <h1>WordCraft WASM Diagnostics</h1>
+          <h2>WordCraft Diagnostics</h2>
 
-          <p>
-          Возобновляемая загрузка WebAssembly
-          с сохранением в IndexedDB.
-          </p>
+          <p>Проверка загрузки WebAssembly.</p>
 
-          <button id="start">
-          Начать / продолжить
+          <button onclick="diagnose()">
+            Проверить заголовки WASM
           </button>
 
-          <button id="stop">
-          Остановить
-          </button>
-
-          <button id="clear">
-          Очистить сохранённые блоки
-          </button>
-
-          <button id="copy">
-          Скопировать отчёт
-          </button>
-
-          <progress id="progress"
-                    value="0"
-                    max="100"></progress>
-
-          <p id="status">Подготовка...</p>
-
-          <pre id="log"></pre>
+          <pre id="output"></pre>
 
           <script>
-          const WASM_FILE = __WASM_PATH__;
-          const EXPECTED_SIZE = __WASM_SIZE__;
-          const EXPECTED_HASH = __WASM_HASH__;
-
-          const CHUNK_SIZE = 512 * 1024;
-          const MAX_RETRIES = 5;
-          const REQUEST_TIMEOUT = 90000;
-
-          const DB_NAME =
-            "wordcraft-wasm-cache-v2";
-
-          const STORE_NAME = "chunks";
-
-          const FILE_KEY =
-            WASM_FILE + ":" + EXPECTED_HASH;
-
-          const logElement =
-            document.getElementById("log");
-
-          const progress =
-            document.getElementById("progress");
-
-          const status =
-            document.getElementById("status");
-
-          const startButton =
-            document.getElementById("start");
-
-          const stopButton =
-            document.getElementById("stop");
-
-          const clearButton =
-            document.getElementById("clear");
-
-          let running = false;
-          let stopRequested = false;
-          let activeController = null;
-
-          function log(message) {
-            logElement.textContent +=
-              message + "\n";
-
-            console.log(message);
-          }
-
-          function formatError(error) {
-            return error?.message ||
-                   String(error);
-          }
-
-          function sleep(ms) {
-            return new Promise(resolve =>
-              setTimeout(resolve, ms)
-            );
-          }
-
-          function openDatabase() {
-            return new Promise(
-              (resolve, reject) => {
-
-                const request =
-                  indexedDB.open(DB_NAME, 1);
-
-                request.onupgradeneeded = () => {
-                  const db = request.result;
-
-                  if (
-                    !db.objectStoreNames.contains(
-                      STORE_NAME
-                    )
-                  ) {
-                    db.createObjectStore(
-                      STORE_NAME
-                    );
-                  }
-                };
-
-                request.onsuccess = () =>
-                  resolve(request.result);
-
-                request.onerror = () =>
-                  reject(request.error);
-              }
-            );
-          }
-
-          async function databaseOperation(
-            mode,
-            operation
-          ) {
-            const db = await openDatabase();
-
-            try {
-              return await new Promise(
-                (resolve, reject) => {
-
-                  const tx = db.transaction(
-                    STORE_NAME,
-                    mode
-                  );
-
-                  const store =
-                    tx.objectStore(STORE_NAME);
-
-                  let result;
-
-                  const request =
-                    operation(store);
-
-                  if (request) {
-                    request.onsuccess = () => {
-                      result = request.result;
-                    };
-
-                    request.onerror = () => {
-                      reject(request.error);
-                    };
-                  }
-
-                  tx.oncomplete = () =>
-                    resolve(result);
-
-                  tx.onerror = () =>
-                    reject(tx.error);
-
-                  tx.onabort = () =>
-                    reject(tx.error);
-                }
-              );
-            } finally {
-              db.close();
-            }
-          }
-
-          function chunkKey(index) {
-            return FILE_KEY + ":" + index;
-          }
-
-          async function getChunk(index) {
-            return databaseOperation(
-              "readonly",
-              store => store.get(
-                chunkKey(index)
-              )
-            );
-          }
-
-          async function saveChunk(
-            index,
-            bytes
-          ) {
-            return databaseOperation(
-              "readwrite",
-              store => store.put(
-                bytes,
-                chunkKey(index)
-              )
-            );
-          }
-
-          async function clearChunks() {
-            return databaseOperation(
-              "readwrite",
-              store => store.clear()
-            );
-          }
-
-          async function fetchChunk(
-            start,
-            end
-          ) {
-            for (
-              let attempt = 1;
-              attempt <= MAX_RETRIES;
-              attempt++
-            ) {
-
-              if (stopRequested) {
-                throw new Error(
-                  "Остановлено пользователем"
-                );
-              }
-
-              const controller =
-                new AbortController();
-
-              activeController = controller;
-
-              const timer = setTimeout(
-                () => controller.abort(),
-                REQUEST_TIMEOUT
-              );
-
-              try {
-
-                const response = await fetch(
-                  WASM_FILE,
-                  {
-                    cache: "no-store",
-                    headers: {
-                      Range:
-                        `bytes=${start}-${end}`
-                    },
-                    signal: controller.signal
-                  }
-                );
-
-                if (response.status !== 206) {
-                  throw new Error(
-                    "Expected HTTP 206, got " +
-                    response.status
-                  );
-                }
-
-                const expectedRange =
-                  `bytes ${start}-${end}/${EXPECTED_SIZE}`;
-
-                const range =
-                  response.headers.get(
-                    "Content-Range"
-                  );
-
-                if (range !== expectedRange) {
-                  throw new Error(
-                    "Unexpected Content-Range: " +
-                    range
-                  );
-                }
-
-                const encoding =
-                  response.headers.get(
-                    "Content-Encoding"
-                  );
-
-                if (
-                  encoding &&
-                  encoding !== "identity"
-                ) {
-                  throw new Error(
-                    "Unexpected range encoding: " +
-                    encoding
-                  );
-                }
-
-                const buffer =
-                  await response.arrayBuffer();
-
-                if (
-                  buffer.byteLength !==
-                  end - start + 1
-                ) {
-                  throw new Error(
-                    "Invalid chunk length"
-                  );
-                }
-
-                return new Uint8Array(buffer);
-
-              } catch (error) {
-
-                if (stopRequested) {
-                  throw new Error(
-                    "Остановлено пользователем"
-                  );
-                }
-
-                log(
-                  "Ошибка блока " +
-                  start + "-" + end +
-                  ", попытка " +
-                  attempt + ": " +
-                  formatError(error)
-                );
-
-                if (attempt === MAX_RETRIES) {
-                  throw error;
-                }
-
-                await sleep(
-                  Math.min(
-                    20000,
-                    2000 * attempt
-                  )
-                );
-
-              } finally {
-                clearTimeout(timer);
-
-                if (
-                  activeController === controller
-                ) {
-                  activeController = null;
-                }
-              }
-            }
-          }
-
-          function updateProgress(bytes) {
-            const percent =
-              bytes / EXPECTED_SIZE * 100;
-
-            progress.value = percent;
-
-            status.textContent =
-              "Сохранено: " +
-              percent.toFixed(1) + "%";
-          }
-
-          async function sha256Hex(bytes) {
-            const digest =
-              await crypto.subtle.digest(
-                "SHA-256",
-                bytes
-              );
-
-            return Array.from(
-              new Uint8Array(digest)
-            ).map(
-              b => b.toString(16)
-                    .padStart(2, "0")
-            ).join("");
+          const WASM = __WASM_PATH__;
+
+          function log(text) {
+            document.getElementById("output")
+              .textContent += text + "\\n";
           }
 
           async function diagnose() {
+            document.getElementById("output")
+              .textContent = "";
 
-            if (running) return;
+            log("WORDCRAFT DIAGNOSTICS");
+            log("=====================");
 
-            running = true;
-            stopRequested = false;
+            log("User Agent:");
+            log(navigator.userAgent);
 
-            startButton.disabled = true;
-            clearButton.disabled = true;
-
-            logElement.textContent = "";
+            log("");
+            log("WASM: " + WASM);
 
             try {
+              const response = await fetch(WASM, {
+                method: "HEAD",
+                cache: "no-store"
+              });
 
-              log("WORDCRAFT WASM DIAGNOSTICS");
-              log("==========================");
+              log("HTTP: " + response.status);
 
-              log("User Agent:");
-              log(navigator.userAgent);
-
-              log("");
-              log("WASM: " + WASM_FILE);
-              log(
-                "Expected size: " +
-                EXPECTED_SIZE
-              );
-
-              log(
-                "Expected SHA-256: " +
-                EXPECTED_HASH
-              );
-
-              log("");
-              log("=== INDEXEDDB ===");
-
-              const totalChunks =
-                Math.ceil(
-                  EXPECTED_SIZE / CHUNK_SIZE
-                );
-
-              let savedBytes = 0;
-
-              for (
-                let i = 0;
-                i < totalChunks;
-                i++
-              ) {
-
-                const start =
-                  i * CHUNK_SIZE;
-
-                const end = Math.min(
-                  start + CHUNK_SIZE,
-                  EXPECTED_SIZE
-                );
-
-                const chunk =
-                  await getChunk(i);
-
-                if (
-                  chunk &&
-                  chunk.byteLength ===
-                  end - start
-                ) {
-                  savedBytes +=
-                    chunk.byteLength;
-                }
+              for (const [key, value] of
+                   response.headers.entries()) {
+                log(key + ": " + value);
               }
-
-              log(
-                "Previously saved: " +
-                savedBytes + " bytes"
-              );
-
-              updateProgress(savedBytes);
-
-              log("");
-              log("=== CHUNK DOWNLOAD ===");
-
-              for (
-                let i = 0;
-                i < totalChunks;
-                i++
-              ) {
-
-                if (stopRequested) {
-                  throw new Error(
-                    "Остановлено пользователем"
-                  );
-                }
-
-                const start =
-                  i * CHUNK_SIZE;
-
-                const end = Math.min(
-                  start + CHUNK_SIZE,
-                  EXPECTED_SIZE
-                );
-
-                const existing =
-                  await getChunk(i);
-
-                if (
-                  existing &&
-                  existing.byteLength ===
-                  end - start
-                ) {
-                  continue;
-                }
-
-                const bytes =
-                  await fetchChunk(
-                    start,
-                    end - 1
-                  );
-
-                await saveChunk(
-                  i,
-                  bytes
-                );
-
-                savedBytes +=
-                  bytes.byteLength;
-
-                updateProgress(savedBytes);
-
-                log(
-                  "OK: блок " +
-                  (i + 1) +
-                  "/" +
-                  totalChunks +
-                  " (" +
-                  savedBytes +
-                  "/" +
-                  EXPECTED_SIZE +
-                  ")"
-                );
-              }
-
-              log("");
-              log("=== ASSEMBLY ===");
-
-              status.textContent =
-                "Сборка WASM";
-
-              const wasmBytes =
-                new Uint8Array(
-                  EXPECTED_SIZE
-                );
-
-              let position = 0;
-
-              for (
-                let i = 0;
-                i < totalChunks;
-                i++
-              ) {
-
-                const chunk =
-                  await getChunk(i);
-
-                if (!chunk) {
-                  throw new Error(
-                    "Missing chunk " + i
-                  );
-                }
-
-                wasmBytes.set(
-                  chunk,
-                  position
-                );
-
-                position +=
-                  chunk.byteLength;
-              }
-
-              if (
-                position !== EXPECTED_SIZE
-              ) {
-                throw new Error(
-                  "Size mismatch"
-                );
-              }
-
-              log(
-                "Assembled: " +
-                position + " bytes"
-              );
-
-              log("");
-              log("=== SHA-256 ===");
-
-              status.textContent =
-                "Проверка SHA-256";
-
-              const actualHash =
-                await sha256Hex(
-                  wasmBytes
-                );
-
-              log(
-                "Actual SHA-256: " +
-                actualHash
-              );
-
-              if (
-                actualHash !== EXPECTED_HASH
-              ) {
-                throw new Error(
-                  "SHA-256 mismatch"
-                );
-              }
-
-              log("SHA-256: SUCCESS");
-
-              log("");
-              log("=== COMPILE TEST ===");
-
-              status.textContent =
-                "Компиляция WebAssembly";
-
-              const module =
-                await WebAssembly.compile(
-                  wasmBytes
-                );
-
-              log(
-                "Compilation: SUCCESS"
-              );
-
-              log(
-                "Imports: " +
-                WebAssembly.Module
-                  .imports(module).length
-              );
-
-              log(
-                "Exports: " +
-                WebAssembly.Module
-                  .exports(module).length
-              );
-
-              log("");
-              log("DIAGNOSTICS COMPLETED");
-
-              status.textContent =
-                "Проверка завершена успешно";
 
             } catch (error) {
-
-              log("");
-              log("=== ERROR ===");
-
-              log(formatError(error));
-
-              status.textContent =
-                "Остановлено или ошибка";
-
-            } finally {
-
-              running = false;
-
-              startButton.disabled = false;
-              clearButton.disabled = false;
+              log("ERROR: " + error);
             }
           }
-
-          startButton.onclick = diagnose;
-
-          stopButton.onclick = () => {
-            stopRequested = true;
-
-            if (activeController) {
-              activeController.abort();
-            }
-
-            status.textContent =
-              "Остановка...";
-          };
-
-          clearButton.onclick = async () => {
-
-            if (running) return;
-
-            if (!confirm(
-              "Удалить все сохранённые блоки?"
-            )) {
-              return;
-            }
-
-            try {
-              await clearChunks();
-
-              progress.value = 0;
-
-              status.textContent =
-                "Сохранённые блоки удалены";
-
-              log("IndexedDB cleared");
-            } catch (error) {
-              log(
-                "Ошибка очистки: " +
-                formatError(error)
-              );
-            }
-          };
-
-          document.getElementById(
-            "copy"
-          ).onclick = async () => {
-
-            try {
-              await navigator.clipboard.writeText(
-                logElement.textContent
-              );
-
-              alert("Отчёт скопирован");
-            } catch (error) {
-              alert(
-                "Не удалось скопировать отчёт"
-              );
-            }
-          };
-
-          async function initialize() {
-            try {
-              const totalChunks =
-                Math.ceil(
-                  EXPECTED_SIZE / CHUNK_SIZE
-                );
-
-              let savedBytes = 0;
-
-              for (
-                let i = 0;
-                i < totalChunks;
-                i++
-              ) {
-                const start =
-                  i * CHUNK_SIZE;
-
-                const expectedLength =
-                  Math.min(
-                    CHUNK_SIZE,
-                    EXPECTED_SIZE - start
-                  );
-
-                const chunk =
-                  await getChunk(i);
-
-                if (
-                  chunk &&
-                  chunk.byteLength ===
-                  expectedLength
-                ) {
-                  savedBytes +=
-                    chunk.byteLength;
-                }
-              }
-
-              updateProgress(savedBytes);
-
-              log(
-                "Сохранено ранее: " +
-                savedBytes + " байт"
-              );
-
-            } catch (error) {
-              log(
-                "IndexedDB error: " +
-                formatError(error)
-              );
-            }
-          }
-
-          initialize();
           </script>
 
           </body>
           </html>
-          '''
+          """
 
           html = html.replace(
               "__WASM_PATH__",
-              json.dumps("./" + wasm_path)
-          )
-
-          html = html.replace(
-              "__WASM_SIZE__",
-              str(wasm_size)
-          )
-
-          html = html.replace(
-              "__WASM_HASH__",
-              json.dumps(sha256)
+              json.dumps(wasm_path)
           )
 
           (root / "diagnostics.html").write_text(
@@ -888,8 +263,7 @@ jobs:
               encoding="utf-8"
           )
 
-          print("Diagnostics created")
-
+          print("Diagnostics page created")
           PY
 
       - name: Verify Deployment
@@ -897,21 +271,23 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Checking files..."
+
           test -f public/index.html
           test -f public/diagnostics.html
 
           find public -name "*.wasm" -print
 
-          echo "Deployment files verified"
+          echo "All required files exist."
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload website
+      - name: Upload Website
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
-      - name: Deploy website
+      - name: Deploy Website
         id: deployment
         uses: actions/deploy-pages@v4
