@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1">
+
+<title>WordCraft WASM Diagnostics</title>
+
+<style>
+body {
+  font-family: system-ui, sans-serif;
+  padding: 20px;
+  background: #f5f5f5;
+  color: #222;
+}
+
+button {
+  padding: 14px 20px;
+  font-size: 16px;
+  border: 0;
+  border-radius: 8px;
+  background: #405bd8;
+  color: white;
+}
+
+pre {
+  background: white;
+  padding: 16px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>WordCraft WASM Diagnostics</h2>
+
+<button onclick="runTests()">
+Запустить диагностику
+</button>
+
+<pre id="log">Ожидание запуска...</pre>
+
+<script>
+
+const wasmFile =
+"wordcraft-web-bc9cdbc0b42827ee_bg.wasm";
+
+const logElement = document.getElementById("log");
+
+function log(message) {
+  logElement.textContent += message + "\n";
+}
+
+function formatBytes(bytes) {
+  return (bytes / 1024 / 1024).toFixed(2) + " MB";
+}
+
+async function testRange(start, end) {
+
+  log("\n=== RANGE TEST ===");
+  log("Байты: " + start + "-" + end);
+
+  const startTime = performance.now();
+
+  try {
+
+    const response = await fetch(wasmFile, {
+      headers: {
+        Range: `bytes=${start}-${end}`
+      },
+      cache: "no-store"
+    });
+
+    log("HTTP Status: " + response.status);
+
+    log(
+      "Content-Length: " +
+      response.headers.get("content-length")
+    );
+
+    log(
+      "Content-Range: " +
+      response.headers.get("content-range")
+    );
+
+    const buffer = await response.arrayBuffer();
+
+    const elapsed =
+      ((performance.now() - startTime) / 1000)
+      .toFixed(2);
+
+    log("Получено: " + formatBytes(buffer.byteLength));
+    log("Время: " + elapsed + " сек.");
+
+    const expected = end - start + 1;
+
+    if (
+      response.status === 206 &&
+      buffer.byteLength === expected
+    ) {
+      log("РЕЗУЛЬТАТ: OK");
+    } else {
+      log("РЕЗУЛЬТАТ: Range не подтверждён");
+    }
+
+  } catch (error) {
+
+    log("ОШИБКА: " + error.name);
+    log(error.message);
+
+  }
+}
+
+async function testFullDownload() {
+
+  log("\n=== FULL DOWNLOAD TEST ===");
+
+  const startTime = performance.now();
+
+  try {
+
+    const response = await fetch(wasmFile, {
+      cache: "no-store"
+    });
+
+    log("HTTP Status: " + response.status);
+
+    const buffer = await response.arrayBuffer();
+
+    const elapsed =
+      ((performance.now() - startTime) / 1000)
+      .toFixed(2);
+
+    log("Получено: " + formatBytes(buffer.byteLength));
+    log("Время: " + elapsed + " сек.");
+
+    log("РЕЗУЛЬТАТ: ЗАГРУЗКА УСПЕШНА");
+
+  } catch (error) {
+
+    log("РЕЗУЛЬТАТ: ОШИБКА");
+
+    log(error.name);
+    log(error.message);
+
+  }
+}
+
+async function runTests() {
+
+  logElement.textContent = "";
+
+  log("WORDCRAFT WASM DIAGNOSTICS");
+  log("=========================");
+
+  log("User Agent:");
+  log(navigator.userAgent);
+
+  log("\nWebAssembly: " +
+      (typeof WebAssembly !== "undefined"));
+
+  log("\nПроверка первого мегабайта");
+
+  await testRange(0, 1048575);
+
+  log("\nПроверка второго мегабайта");
+
+  await testRange(1048576, 2097151);
+
+  log("\nПроверка блока 10–11 MB");
+
+  await testRange(10485760, 11534335);
+
+  log("\nПроверка полной загрузки");
+
+  await testFullDownload();
+
+  log("\n=== ДИАГНОСТИКА ЗАВЕРШЕНА ===");
+
+}
+
+</script>
+
+</body>
+</html>
