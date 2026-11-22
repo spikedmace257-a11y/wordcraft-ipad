@@ -10,6 +10,10 @@ permissions:
   pages: write
   id-token: write
 
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -19,6 +23,10 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+
+      # ==========================================
+      # 1. DOWNLOAD WORDCRAFT
+      # ==========================================
 
       - name: Download WordCraft
         shell: bash
@@ -43,52 +51,64 @@ jobs:
 
           touch public/.nojekyll
 
-      - name: Diagnose WordCraft Files
+          echo "WordCraft downloaded successfully"
+
+
+      # ==========================================
+      # 2. VERIFY WORDCRAFT FILES
+      # ==========================================
+
+      - name: Verify WordCraft Files
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== WORDCRAFT FILES ==="
+          test -f public/index.html
+
+          echo "=== FILES ==="
           find public -type f | head -80
 
-          echo "=== INDEX.HTML ==="
-          sed -n '1,160p' public/index.html
+          echo "=== WEBASSEMBLY ==="
+          find public -type f -name "*.wasm"
 
           echo "=== JAVASCRIPT ==="
           find public -type f \
             \( -name "*.js" -o -name "*.mjs" \)
 
-          echo "=== WEBASSEMBLY ==="
-          find public -type f -name "*.wasm"
-
-          echo "=== RESOURCE PATHS ==="
-          grep -nE \
-            '(src=|href=|/assets/|/pkg/|\.wasm)' \
-            public/index.html || true
-
           echo "=== FILE SIZES ==="
           du -ah public | sort -h | tail -20
 
-      - name: Add Safari Startup Diagnostics
+
+      # ==========================================
+      # 3. INSTALL STARTUP DIAGNOSTICS
+      # ==========================================
+
+      - name: Install Safari Startup Diagnostics
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           p = Path("public/index.html")
-
           html = p.read_text(encoding="utf-8")
 
           script = r'''
-          <!-- WordCraft startup diagnostics -->
-
           <script>
           (() => {
 
             let appStarted = false;
             let lastError = null;
 
+            const startTime = performance.now();
+
+            const standalone =
+              window.matchMedia(
+                "(display-mode: standalone)"
+              ).matches ||
+              navigator.standalone === true;
+
             function formatError(error) {
+
               if (error == null) {
                 return "Неизвестная ошибка";
               }
@@ -112,8 +132,16 @@ jobs:
               const initialized =
                 typeof window.wasmBindings !== "undefined";
 
+              const elapsed =
+                Math.round(
+                  (performance.now() - startTime) / 1000
+                );
+
               return (
                 "\n\n=== СОСТОЯНИЕ БРАУЗЕРА ===" +
+
+                "\nРежим: " +
+                (standalone ? "PWA" : "Safari") +
 
                 "\nWebAssembly: " +
                 (wasm ? "доступен" : "недоступен") +
@@ -130,6 +158,8 @@ jobs:
                 "\nСигнал запуска: " +
                 (appStarted ? "получен" : "не получен") +
 
+                "\nВремя: " + elapsed + " секунд" +
+
                 "\nАдрес: " +
                 window.location.href +
 
@@ -145,7 +175,9 @@ jobs:
               function display() {
 
                 let box =
-                  document.getElementById("wordcraft_loading");
+                  document.getElementById(
+                    "wordcraft_diagnostics"
+                  );
 
                 if (!box) {
 
@@ -176,7 +208,6 @@ jobs:
                   "ДИАГНОСТИКА WORDCRAFT\n\n" +
                   message +
                   getEnvironment();
-
               }
 
               if (document.body) {
@@ -242,7 +273,7 @@ jobs:
                 appStarted = true;
 
                 console.log(
-                  "WordCraft: WASM initialization completed"
+                  "WordCraft startup signal received"
                 );
 
               }
@@ -250,12 +281,14 @@ jobs:
 
             setTimeout(() => {
 
-              if (lastError) {
+              if (lastError || appStarted) {
                 return;
               }
 
               const loading =
-                document.getElementById("wordcraft_loading");
+                document.getElementById(
+                  "wordcraft_loading"
+                );
 
               if (!loading) {
                 return;
@@ -264,38 +297,18 @@ jobs:
               const style =
                 window.getComputedStyle(loading);
 
-              const visible =
-                style.display !== "none" &&
-                style.visibility !== "hidden";
-
-              if (!visible) {
+              if (
+                style.display === "none" ||
+                style.visibility === "hidden"
+              ) {
                 return;
               }
 
-              if (!appStarted) {
-
-                showError(
-                  "WORDCRAFT НЕ ЗАПУСТИЛСЯ\n\n" +
-                  "За 45 секунд приложение не " +
-                  "отправило сигнал успешного запуска.\n\n" +
-                  "Возможные причины:\n" +
-                  "1. Ошибка инициализации WebAssembly.\n" +
-                  "2. Недостаточно памяти.\n" +
-                  "3. Несовместимость с Safari.\n" +
-                  "4. Ошибка графического движка."
-                );
-
-              } else {
-
-                showError(
-                  "WORDCRAFT ЧАСТИЧНО ЗАПУСТИЛСЯ\n\n" +
-                  "Сигнал инициализации получен, " +
-                  "но экран загрузки остаётся видимым.\n\n" +
-                  "Возможна проблема с графическим " +
-                  "интерфейсом или отображением Canvas."
-                );
-
-              }
+              showError(
+                "WORDCRAFT НЕ ЗАПУСТИЛСЯ\n\n" +
+                "Приложение не отправило сигнал " +
+                "запуска за 45 секунд."
+              );
 
             }, 45000);
 
@@ -304,9 +317,7 @@ jobs:
           '''
 
           if "<head>" not in html:
-              raise SystemExit(
-                  "ERROR: <head> not found in index.html"
-              )
+              raise SystemExit("HEAD not found")
 
           html = html.replace(
               "<head>",
@@ -314,21 +325,234 @@ jobs:
               1
           )
 
-          p.write_text(
-              html,
-              encoding="utf-8"
-          )
+          p.write_text(html, encoding="utf-8")
 
-          print("Safari diagnostics installed successfully")
+          print("Startup diagnostics installed")
           PY
+
+
+      # ==========================================
+      # 4. CREATE NETWORK DIAGNOSTICS
+      # ==========================================
+
+      - name: Create Network Diagnostics
+        shell: bash
+        run: |
+          cat > public/diagnostics.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="ru">
+
+          <head>
+          <meta charset="UTF-8">
+
+          <meta name="viewport"
+                content="width=device-width, initial-scale=1">
+
+          <title>WordCraft Diagnostics</title>
+
+          <style>
+
+          body {
+            font-family: system-ui, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+            color: #222;
+          }
+
+          h1 {
+            font-size: 24px;
+          }
+
+          pre {
+            background: white;
+            padding: 16px;
+            border-radius: 8px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+          }
+
+          button {
+            padding: 12px 18px;
+            font-size: 16px;
+            margin-bottom: 20px;
+          }
+
+          </style>
+
+          </head>
+
+          <body>
+
+          <h1>WordCraft Diagnostics</h1>
+
+          <button onclick="runTests()">
+            Запустить диагностику
+          </button>
+
+          <pre id="output">
+          Нажмите кнопку для проверки.
+          </pre>
+
+          <script>
+
+          const output =
+            document.getElementById("output");
+
+          function log(message) {
+
+            output.textContent +=
+              message + "\n";
+          }
+
+          async function runTests() {
+
+            output.textContent = "";
+
+            const standalone =
+              window.matchMedia(
+                "(display-mode: standalone)"
+              ).matches ||
+              navigator.standalone === true;
+
+            log(
+              "Режим: " +
+              (standalone ? "PWA" : "Safari")
+            );
+
+            log(
+              "WebAssembly: " +
+              (typeof WebAssembly !== "undefined")
+            );
+
+            log(
+              "WebGL2: " +
+              (typeof WebGL2RenderingContext !== "undefined")
+            );
+
+            log(
+              "WebGPU: " +
+              (typeof navigator.gpu !== "undefined")
+            );
+
+            log("\n=== WASM TEST ===");
+
+            try {
+
+              const files = await fetch(
+                "./wasm-file.txt",
+                { cache: "no-store" }
+              );
+
+              if (!files.ok) {
+                throw new Error(
+                  "WASM filename request: HTTP " +
+                  files.status
+                );
+              }
+
+              const wasmFile =
+                (await files.text()).trim();
+
+              log("Файл: " + wasmFile);
+
+              const response = await fetch(
+                "./" + wasmFile,
+                { cache: "no-store" }
+              );
+
+              log(
+                "HTTP Status: " +
+                response.status
+              );
+
+              log(
+                "Content-Type: " +
+                response.headers.get(
+                  "content-type"
+                )
+              );
+
+              if (!response.ok) {
+                throw new Error(
+                  "HTTP " + response.status
+                );
+              }
+
+              const buffer =
+                await response.arrayBuffer();
+
+              log(
+                "Размер: " +
+                buffer.byteLength +
+                " bytes"
+              );
+
+              log("Компиляция WASM...");
+
+              await WebAssembly.compile(buffer);
+
+              log("WASM compilation: SUCCESS");
+
+            } catch (error) {
+
+              log(
+                "ERROR: " +
+                (error.stack || error.message)
+              );
+            }
+
+          }
+
+          </script>
+
+          </body>
+          </html>
+          EOF
+
+
+      # ==========================================
+      # 5. REGISTER WASM FILE
+      # ==========================================
+
+      - name: Register WASM File
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WASM=$(find public -type f \
+            -name "*.wasm" -print -quit)
+
+          test -n "$WASM"
+
+          WASM=${WASM#public/}
+
+          printf '%s\n' "$WASM" \
+            > public/wasm-file.txt
+
+          echo "WASM file: $WASM"
+
+
+      # ==========================================
+      # 6. CONFIGURE GITHUB PAGES
+      # ==========================================
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+
+
+      # ==========================================
+      # 7. UPLOAD WEBSITE
+      # ==========================================
 
       - name: Upload website
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
+
+
+      # ==========================================
+      # 8. DEPLOY WEBSITE
+      # ==========================================
 
       - name: Deploy website
         id: deployment
