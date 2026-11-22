@@ -10,10 +10,6 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: github-pages
-  cancel-in-progress: false
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -23,11 +19,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-
-      # ==========================================
-      # 1. DOWNLOAD WORDCRAFT
-      # ==========================================
-
       - name: Download WordCraft
         shell: bash
         run: |
@@ -51,19 +42,12 @@ jobs:
 
           touch public/.nojekyll
 
-          echo "WordCraft downloaded successfully"
-
-
-      # ==========================================
-      # 2. VERIFY WORDCRAFT FILES
-      # ==========================================
+          echo "WordCraft files downloaded successfully"
 
       - name: Verify WordCraft Files
         shell: bash
         run: |
           set -euo pipefail
-
-          test -f public/index.html
 
           echo "=== FILES ==="
           find public -type f | head -80
@@ -71,277 +55,39 @@ jobs:
           echo "=== WEBASSEMBLY ==="
           find public -type f -name "*.wasm"
 
-          echo "=== JAVASCRIPT ==="
-          find public -type f \
-            \( -name "*.js" -o -name "*.mjs" \)
-
           echo "=== FILE SIZES ==="
           du -ah public | sort -h | tail -20
 
+          test -f public/index.html
 
-      # ==========================================
-      # 3. INSTALL STARTUP DIAGNOSTICS
-      # ==========================================
+          WASM=$(find public -type f -name "*_bg.wasm" -print -quit)
 
-      - name: Install Safari Startup Diagnostics
+          test -n "$WASM"
+
+          echo "WASM file: $WASM"
+
+      - name: Create WASM Diagnostics
         shell: bash
         run: |
+          set -euo pipefail
+
           python3 - <<'PY'
           from pathlib import Path
+          import json
 
-          p = Path("public/index.html")
-          html = p.read_text(encoding="utf-8")
+          public = Path("public")
 
-          script = r'''
-          <script>
-          (() => {
+          wasm_files = list(public.glob("*_bg.wasm"))
 
-            let appStarted = false;
-            let lastError = null;
+          if not wasm_files:
+              raise SystemExit("ERROR: WASM file not found")
 
-            const startTime = performance.now();
+          wasm_name = wasm_files[0].name
 
-            const standalone =
-              window.matchMedia(
-                "(display-mode: standalone)"
-              ).matches ||
-              navigator.standalone === true;
+          print("Diagnostic WASM:", wasm_name)
 
-            function formatError(error) {
-
-              if (error == null) {
-                return "Неизвестная ошибка";
-              }
-
-              return error.stack ||
-                     error.message ||
-                     String(error);
-            }
-
-            function getEnvironment() {
-
-              const wasm =
-                typeof WebAssembly !== "undefined";
-
-              const webgl2 =
-                typeof WebGL2RenderingContext !== "undefined";
-
-              const webgpu =
-                typeof navigator.gpu !== "undefined";
-
-              const initialized =
-                typeof window.wasmBindings !== "undefined";
-
-              const elapsed =
-                Math.round(
-                  (performance.now() - startTime) / 1000
-                );
-
-              return (
-                "\n\n=== СОСТОЯНИЕ БРАУЗЕРА ===" +
-
-                "\nРежим: " +
-                (standalone ? "PWA" : "Safari") +
-
-                "\nWebAssembly: " +
-                (wasm ? "доступен" : "недоступен") +
-
-                "\nWebGL2 API: " +
-                (webgl2 ? "обнаружен" : "не обнаружен") +
-
-                "\nWebGPU API: " +
-                (webgpu ? "обнаружен" : "не обнаружен") +
-
-                "\nWASM bindings: " +
-                (initialized ? "созданы" : "не созданы") +
-
-                "\nСигнал запуска: " +
-                (appStarted ? "получен" : "не получен") +
-
-                "\nВремя: " + elapsed + " секунд" +
-
-                "\nАдрес: " +
-                window.location.href +
-
-                "\nUser Agent: " +
-                navigator.userAgent
-              );
-            }
-
-            function showError(message) {
-
-              lastError = message;
-
-              function display() {
-
-                let box =
-                  document.getElementById(
-                    "wordcraft_diagnostics"
-                  );
-
-                if (!box) {
-
-                  box = document.createElement("div");
-
-                  box.id = "wordcraft_diagnostics";
-
-                  document.body.appendChild(box);
-                }
-
-                box.style.cssText = `
-                  position: fixed;
-                  inset: 0;
-                  z-index: 999999;
-                  padding: 24px;
-                  box-sizing: border-box;
-                  background: #fff5f5;
-                  color: #8b0000;
-                  font: 14px system-ui, sans-serif;
-                  white-space: pre-wrap;
-                  overflow: auto;
-                  overflow-wrap: anywhere;
-                  text-align: left;
-                  pointer-events: auto;
-                `;
-
-                box.textContent =
-                  "ДИАГНОСТИКА WORDCRAFT\n\n" +
-                  message +
-                  getEnvironment();
-              }
-
-              if (document.body) {
-                display();
-              } else {
-                document.addEventListener(
-                  "DOMContentLoaded",
-                  display,
-                  { once: true }
-                );
-              }
-            }
-
-            window.addEventListener(
-              "error",
-              event => {
-
-                if (event.target !== window) {
-
-                  const target = event.target;
-
-                  const resource =
-                    target.src ||
-                    target.href ||
-                    target.tagName ||
-                    "неизвестный ресурс";
-
-                  showError(
-                    "ОШИБКА ЗАГРУЗКИ РЕСУРСА\n\n" +
-                    resource
-                  );
-
-                  return;
-                }
-
-                showError(
-                  "ОШИБКА JAVASCRIPT\n\n" +
-                  (event.message || "Неизвестная ошибка") +
-                  "\n\n" +
-                  formatError(event.error)
-                );
-
-              },
-              true
-            );
-
-            window.addEventListener(
-              "unhandledrejection",
-              event => {
-
-                showError(
-                  "ОШИБКА ЗАПУСКА WORDCRAFT\n\n" +
-                  formatError(event.reason)
-                );
-
-              }
-            );
-
-            window.addEventListener(
-              "TrunkApplicationStarted",
-              () => {
-
-                appStarted = true;
-
-                console.log(
-                  "WordCraft startup signal received"
-                );
-
-              }
-            );
-
-            setTimeout(() => {
-
-              if (lastError || appStarted) {
-                return;
-              }
-
-              const loading =
-                document.getElementById(
-                  "wordcraft_loading"
-                );
-
-              if (!loading) {
-                return;
-              }
-
-              const style =
-                window.getComputedStyle(loading);
-
-              if (
-                style.display === "none" ||
-                style.visibility === "hidden"
-              ) {
-                return;
-              }
-
-              showError(
-                "WORDCRAFT НЕ ЗАПУСТИЛСЯ\n\n" +
-                "Приложение не отправило сигнал " +
-                "запуска за 45 секунд."
-              );
-
-            }, 45000);
-
-          })();
-          </script>
-          '''
-
-          if "<head>" not in html:
-              raise SystemExit("HEAD not found")
-
-          html = html.replace(
-              "<head>",
-              "<head>\n" + script,
-              1
-          )
-
-          p.write_text(html, encoding="utf-8")
-
-          print("Startup diagnostics installed")
-          PY
-
-
-      # ==========================================
-      # 4. CREATE NETWORK DIAGNOSTICS
-      # ==========================================
-
-      - name: Create Network Diagnostics
-        shell: bash
-        run: |
-          cat > public/diagnostics.html <<'EOF'
-          <!DOCTYPE html>
+          html = r'''<!DOCTYPE html>
           <html lang="ru">
-
           <head>
           <meta charset="UTF-8">
 
@@ -351,16 +97,29 @@ jobs:
           <title>WordCraft Diagnostics</title>
 
           <style>
-
           body {
             font-family: system-ui, sans-serif;
-            background: #f5f5f5;
             padding: 20px;
+            background: #f5f5f5;
             color: #222;
           }
 
           h1 {
             font-size: 24px;
+          }
+
+          button {
+            padding: 14px 20px;
+            font-size: 16px;
+            border: 0;
+            border-radius: 8px;
+            background: #405bd8;
+            color: white;
+            cursor: pointer;
+          }
+
+          button:disabled {
+            opacity: 0.5;
           }
 
           pre {
@@ -369,107 +128,148 @@ jobs:
             border-radius: 8px;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
+            font-size: 13px;
+            line-height: 1.5;
           }
-
-          button {
-            padding: 12px 18px;
-            font-size: 16px;
-            margin-bottom: 20px;
-          }
-
           </style>
-
           </head>
 
           <body>
 
           <h1>WordCraft Diagnostics</h1>
 
-          <button onclick="runTests()">
+          <p>Проверка загрузки WebAssembly на iPad.</p>
+
+          <button id="start" onclick="runTests()">
             Запустить диагностику
           </button>
 
-          <pre id="output">
-          Нажмите кнопку для проверки.
-          </pre>
+          <pre id="log">Ожидание запуска...</pre>
 
           <script>
 
-          const output =
-            document.getElementById("output");
+          const wasmFile = __WASM_FILE__;
+
+          const logElement =
+            document.getElementById("log");
+
+          const startButton =
+            document.getElementById("start");
 
           function log(message) {
-
-            output.textContent +=
-              message + "\n";
+            logElement.textContent += message + "\n";
           }
 
-          async function runTests() {
-
-            output.textContent = "";
-
-            const standalone =
-              window.matchMedia(
-                "(display-mode: standalone)"
-              ).matches ||
-              navigator.standalone === true;
-
-            log(
-              "Режим: " +
-              (standalone ? "PWA" : "Safari")
+          function formatBytes(bytes) {
+            return (
+              (bytes / 1024 / 1024).toFixed(2) +
+              " MB"
             );
+          }
 
-            log(
-              "WebAssembly: " +
-              (typeof WebAssembly !== "undefined")
-            );
+          function elapsed(start) {
+            return (
+              (performance.now() - start) / 1000
+            ).toFixed(2);
+          }
 
-            log(
-              "WebGL2: " +
-              (typeof WebGL2RenderingContext !== "undefined")
-            );
+          async function testRange(start, end) {
 
-            log(
-              "WebGPU: " +
-              (typeof navigator.gpu !== "undefined")
-            );
+            log("\n=== RANGE TEST ===");
 
-            log("\n=== WASM TEST ===");
+            log("Байты: " + start + "-" + end);
+
+            const started = performance.now();
 
             try {
 
-              const files = await fetch(
-                "./wasm-file.txt",
-                { cache: "no-store" }
-              );
+              const response = await fetch(wasmFile, {
+                headers: {
+                  Range: `bytes=${start}-${end}`
+                },
+                cache: "no-store"
+              });
 
-              if (!files.ok) {
-                throw new Error(
-                  "WASM filename request: HTTP " +
-                  files.status
-                );
-              }
+              log("HTTP Status: " + response.status);
 
-              const wasmFile =
-                (await files.text()).trim();
-
-              log("Файл: " + wasmFile);
-
-              const response = await fetch(
-                "./" + wasmFile,
-                { cache: "no-store" }
+              log(
+                "Content-Length: " +
+                response.headers.get("content-length")
               );
 
               log(
-                "HTTP Status: " +
-                response.status
+                "Content-Range: " +
+                response.headers.get("content-range")
+              );
+
+              if (response.status !== 206) {
+
+                log(
+                  "Сервер не подтвердил частичную загрузку."
+                );
+
+                if (response.body) {
+                  await response.body.cancel();
+                }
+
+                return;
+              }
+
+              const buffer =
+                await response.arrayBuffer();
+
+              log(
+                "Получено: " +
+                formatBytes(buffer.byteLength)
+              );
+
+              log(
+                "Время: " +
+                elapsed(started) +
+                " сек."
+              );
+
+              const expected = end - start + 1;
+
+              if (buffer.byteLength === expected) {
+                log("РЕЗУЛЬТАТ: OK");
+              } else {
+                log("РЕЗУЛЬТАТ: НЕПОЛНЫЕ ДАННЫЕ");
+              }
+
+            } catch (error) {
+
+              log("РЕЗУЛЬТАТ: ОШИБКА");
+
+              log(error.name || "Error");
+
+              log(error.message || String(error));
+
+            }
+          }
+
+          async function testFullDownload() {
+
+            log("\n=== FULL DOWNLOAD TEST ===");
+
+            const started = performance.now();
+
+            try {
+
+              const response = await fetch(wasmFile, {
+                cache: "no-store"
+              });
+
+              log("HTTP Status: " + response.status);
+
+              log(
+                "Content-Length: " +
+                response.headers.get("content-length")
               );
 
               log(
                 "Content-Type: " +
-                response.headers.get(
-                  "content-type"
-                )
+                response.headers.get("content-type")
               );
 
               if (!response.ok) {
@@ -482,77 +282,148 @@ jobs:
                 await response.arrayBuffer();
 
               log(
-                "Размер: " +
-                buffer.byteLength +
-                " bytes"
+                "Получено: " +
+                formatBytes(buffer.byteLength)
               );
 
-              log("Компиляция WASM...");
+              log(
+                "Время: " +
+                elapsed(started) +
+                " сек."
+              );
 
-              await WebAssembly.compile(buffer);
-
-              log("WASM compilation: SUCCESS");
+              log("РЕЗУЛЬТАТ: ЗАГРУЗКА УСПЕШНА");
 
             } catch (error) {
 
-              log(
-                "ERROR: " +
-                (error.stack || error.message)
-              );
-            }
+              log("РЕЗУЛЬТАТ: ОШИБКА");
 
+              log(error.name || "Error");
+
+              log(error.message || String(error));
+
+            }
+          }
+
+          async function runTests() {
+
+            startButton.disabled = true;
+
+            logElement.textContent = "";
+
+            try {
+
+              log("WORDCRAFT WASM DIAGNOSTICS");
+
+              log("=========================");
+
+              log("\nUser Agent:");
+
+              log(navigator.userAgent);
+
+              log(
+                "\nWebAssembly: " +
+                (typeof WebAssembly !== "undefined")
+              );
+
+              log(
+                "WebGL2: " +
+                (typeof WebGL2RenderingContext !==
+                 "undefined")
+              );
+
+              log(
+                "WebGPU: " +
+                (typeof navigator.gpu !== "undefined")
+              );
+
+              log("\nWASM FILE:");
+
+              log(wasmFile);
+
+              log("\nПроверка первого мегабайта");
+
+              await testRange(0, 1048575);
+
+              log("\nПроверка второго мегабайта");
+
+              await testRange(1048576, 2097151);
+
+              log("\nПроверка блока 10–11 MB");
+
+              await testRange(10485760, 11534335);
+
+              log("\nПроверка полной загрузки");
+
+              await testFullDownload();
+
+              log("\n=== ДИАГНОСТИКА ЗАВЕРШЕНА ===");
+
+            } catch (error) {
+
+              log("\nНЕОЖИДАННАЯ ОШИБКА");
+
+              log(String(error));
+
+            } finally {
+
+              startButton.disabled = false;
+
+            }
           }
 
           </script>
 
           </body>
           </html>
-          EOF
+          '''
 
+          html = html.replace(
+              "__WASM_FILE__",
+              json.dumps(wasm_name)
+          )
 
-      # ==========================================
-      # 5. REGISTER WASM FILE
-      # ==========================================
+          (public / "diagnostics.html").write_text(
+              html,
+              encoding="utf-8"
+          )
 
-      - name: Register WASM File
+          print("Diagnostics created successfully")
+          PY
+
+      - name: Verify Deployment
         shell: bash
         run: |
           set -euo pipefail
 
-          WASM=$(find public -type f \
-            -name "*.wasm" -print -quit)
+          echo "=== VERIFY DEPLOYMENT ==="
+
+          test -f public/index.html
+
+          test -f public/diagnostics.html
+
+          WASM=$(find public -type f -name "*_bg.wasm" -print -quit)
 
           test -n "$WASM"
 
-          WASM=${WASM#public/}
+          echo "=== WASM SIZE ==="
+          du -h "$WASM"
 
-          printf '%s\n' "$WASM" \
-            > public/wasm-file.txt
+          echo "=== DIAGNOSTICS ==="
+          ls -lh public/diagnostics.html
 
-          echo "WASM file: $WASM"
+          echo "=== TOTAL SIZE ==="
+          du -sh public
 
-
-      # ==========================================
-      # 6. CONFIGURE GITHUB PAGES
-      # ==========================================
+          echo "Verification successful"
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
-
-
-      # ==========================================
-      # 7. UPLOAD WEBSITE
-      # ==========================================
 
       - name: Upload website
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
-
-
-      # ==========================================
-      # 8. DEPLOY WEBSITE
-      # ==========================================
 
       - name: Deploy website
         id: deployment
